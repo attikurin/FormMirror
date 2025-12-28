@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FormMirror - 動作分析・フォームチェック</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    
+    <!-- MediaPipe Pose & Drawing Utils -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+
+    <style>
+        /* カスタムスクロールバー */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1; 
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1; 
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8; 
+        }
+
+        /* ビデオコンテナのスタイル */
+        .video-container {
+            position: relative;
+            background-color: #000;
+            border-radius: 0.75rem;
+            overflow: hidden;
+            aspect-ratio: 16 / 9;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        /* 分析用キャンバス（ビデオの上に重ねる） */
+        .analysis-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* クリックを透過 */
+            z-index: 25; /* ビデオ(z-20)より上 */
+        }
+
+        /* カメラ映像の反転（鏡文字防止） */
+        .mirror-mode {
+            transform: scaleX(-1);
+        }
+        
+        /* キャンバスも反転させる場合 */
+        .canvas-mirror {
+            transform: scaleX(-1);
+        }
+
+        /* レンジスライダーのカスタマイズ */
+        input[type=range] {
+            -webkit-appearance: none;
+            background: transparent;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            background: #3b82f6;
+            cursor: pointer;
+            margin-top: -6px;
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            cursor: pointer;
+            background: #e2e8f0;
+            border-radius: 2px;
+        }
+
+        /* スイッチトグル */
+        .toggle-checkbox:checked {
+            right: 0;
+            border-color: #3b82f6;
+        }
+        .toggle-checkbox:checked + .toggle-label {
+            background-color: #3b82f6;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col font-sans">
+
+    <!-- ヘッダー -->
+    <header class="bg-blue-600 text-white p-4 shadow-md sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto flex justify-between items-center">
+            <div class="flex items-center gap-2">
+                <i class="fas fa-running text-2xl"></i>
+                <h1 class="text-xl font-bold tracking-tight">FormMirror</h1>
+            </div>
+            <div class="flex items-center gap-4">
+                <button onclick="toggleLayout()" id="layoutBtn" class="hidden md:flex text-xs md:text-sm bg-blue-700 hover:bg-blue-800 py-1.5 px-3 rounded-full transition items-center gap-1 border border-blue-500">
+                    <i class="fas fa-columns"></i> <span>表示切替</span>
+                </button>
+                <button onclick="toggleHelp()" class="text-white hover:text-blue-200 transition p-1" title="使い方">
+                    <i class="fas fa-bars text-xl"></i>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- メインコンテンツ -->
+    <main class="flex-grow p-4 max-w-7xl mx-auto w-full flex flex-col gap-6">
+
+        <!-- コントロールパネル (上部) -->
+        <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200 space-y-4">
+            
+            <!-- 上段：AI分析設定 -->
+            <div class="flex flex-wrap gap-4 items-center justify-center md:justify-start border-b border-slate-100 pb-4">
+                <span class="text-sm font-bold text-slate-700"><i class="fas fa-project-diagram mr-1 text-purple-500"></i>AI分析:</span>
+                
+                <label class="flex items-center cursor-pointer gap-2 bg-slate-50 px-3 py-1.5 rounded-lg hover:bg-slate-100 border border-slate-200">
+                    <input type="checkbox" id="skeletonToggle" class="form-checkbox h-4 w-4 text-blue-600 rounded" checked>
+                    <span class="text-sm select-none">骨格表示</span>
+                </label>
+
+                <label class="flex items-center cursor-pointer gap-2 bg-slate-50 px-3 py-1.5 rounded-lg hover:bg-slate-100 border border-slate-200">
+                    <input type="checkbox" id="trajectoryToggle" class="form-checkbox h-4 w-4 text-rose-500 rounded" checked>
+                    <span class="text-sm select-none">軌跡を表示</span>
+                </label>
+
+                <label class="flex items-center cursor-pointer gap-2 bg-slate-50 px-3 py-1.5 rounded-lg hover:bg-slate-100 border border-slate-200" title="顔を自動で拡大して右上に表示します">
+                    <input type="checkbox" id="faceZoomToggle" class="form-checkbox h-4 w-4 text-amber-500 rounded">
+                    <span class="text-sm select-none"><i class="far fa-smile mr-1"></i>表情ワイプ</span>
+                </label>
+
+                <button onclick="clearTrajectory()" class="text-xs text-slate-500 hover:text-rose-500 underline ml-2">
+                    <i class="fas fa-eraser"></i> 軌跡クリア
+                </button>
+
+                <div id="aiStatus" class="ml-auto text-xs font-mono text-slate-400 flex items-center gap-1">
+                    <div class="w-2 h-2 bg-slate-300 rounded-full" id="aiStatusDot"></div>
+                    <span id="aiStatusText">AI準備中...</span>
+                </div>
+            </div>
+
+            <!-- 下段：再生コントロール -->
+            <div class="flex flex-wrap gap-4 items-center justify-center md:justify-between">
+                
+                <!-- 再生速度コントロール -->
+                <div class="flex items-center gap-3 bg-slate-100 px-4 py-2 rounded-lg">
+                    <span class="text-sm font-semibold text-slate-600"><i class="fas fa-tachometer-alt mr-1"></i>再生速度</span>
+                    <div class="flex gap-1">
+                        <button onclick="setSpeed(0.25)" class="speed-btn px-2 py-1 text-xs rounded bg-white border border-slate-300 hover:bg-blue-50 transition">0.25</button>
+                        <button onclick="setSpeed(0.5)" class="speed-btn px-2 py-1 text-xs rounded bg-white border border-slate-300 hover:bg-blue-50 transition">0.5</button>
+                        <button onclick="setSpeed(1.0)" class="speed-btn px-2 py-1 text-xs rounded bg-blue-600 text-white border border-blue-600 transition">1.0</button>
+                    </div>
+                </div>
+
+                <!-- 同時操作ボタン -->
+                <div class="flex gap-2">
+                    <button id="syncPlayBtn" class="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-2 rounded-lg font-bold shadow transition active:scale-95">
+                        <i class="fas fa-play"></i> 再生
+                    </button>
+                    <button id="syncPauseBtn" class="flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white px-6 py-2 rounded-lg font-bold shadow transition active:scale-95 hidden">
+                        <i class="fas fa-pause"></i> 一時停止
+                    </button>
+                    <button id="syncResetBtn" onclick="resetVideos()" class="flex items-center gap-2 bg-slate-200 hover:bg-slate-300 text-slate-700 px-4 py-2 rounded-lg font-bold shadow transition">
+                        <i class="fas fa-undo"></i> 最初に戻す
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ビデオグリッドエリア -->
+        <div id="videoGrid" class="grid grid-cols-1 md:grid-cols-2 gap-4 h-full transition-all duration-300">
+            
+            <!-- 左：お手本・比較動画エリア -->
+            <div id="modelColumn" class="flex flex-col gap-2 transition-all duration-300">
+                <div class="flex justify-between items-center px-1">
+                    <h2 class="font-bold text-slate-700 flex items-center gap-2">
+                        <span class="w-2 h-6 bg-blue-500 rounded-full"></span> お手本動画
+                    </h2>
+                    <label class="cursor-pointer bg-white border border-blue-200 text-blue-600 text-sm px-3 py-1 rounded-full hover:bg-blue-50 transition shadow-sm">
+                        <i class="fas fa-upload mr-1"></i> 動画を選択
+                        <input type="file" id="modelInput" accept="video/*" class="hidden">
+                    </label>
+                </div>
+                
+                <div class="video-container group bg-slate-900">
+                    <video id="modelVideo" playsinline webkit-playsinline class="w-full h-full"></video>
+                    
+                    <!-- プレースホルダー -->
+                    <div id="modelPlaceholder" class="absolute inset-0 flex flex-col items-center justify-center text-slate-400 bg-slate-100 z-10">
+                        <i class="fas fa-file-video text-4xl mb-2 text-slate-300"></i>
+                        <p class="text-sm">動画ファイルを選択</p>
+                        <p class="text-xs text-slate-400 mt-1">（比較する場合）</p>
+                    </div>
+
+                    <!-- シークバー（簡易） -->
+                    <div class="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2 opacity-0 group-hover:opacity-100 transition-opacity z-20">
+                        <input type="range" id="modelSeek" min="0" value="0" step="0.1" class="w-full">
+                    </div>
+                </div>
+                <div class="text-center text-xs text-slate-500" id="modelTimeDisplay">00:00 / 00:00</div>
+            </div>
+
+            <!-- 右：自分の動きエリア -->
+            <div id="cameraColumn" class="flex flex-col gap-2 transition-all duration-300">
+                <div class="flex justify-between items-center px-1">
+                    <h2 class="font-bold text-slate-700 flex items-center gap-2">
+                        <span class="w-2 h-6 bg-rose-500 rounded-full"></span> 自分の動き
+                    </h2>
+                    <div class="flex gap-2">
+                         <button onclick="toggleMirror()" class="text-xs bg-white border border-slate-200 text-slate-600 px-2 py-1 rounded hover:bg-slate-50" title="左右反転">
+                            <i class="fas fa-exchange-alt"></i> 反転
+                        </button>
+                    </div>
+                </div>
+
+                <div class="video-container relative bg-slate-900">
+                    <!-- ライブカメラ映像 -->
+                    <video id="cameraVideo" autoplay playsinline muted class="absolute inset-0 w-full h-full object-cover mirror-mode z-10"></video>
+                    
+                    <!-- 録画済みプレビュー映像 -->
+                    <video id="recordedVideo" playsinline class="absolute inset-0 w-full h-full object-contain hidden z-20 bg-black"></video>
+
+                    <!-- 分析レイヤー (Canvas) -->
+                    <canvas id="outputCanvas" class="analysis-canvas canvas-mirror"></canvas>
+
+                    <!-- カウントダウンオーバーレイ -->
+                    <div id="countdownOverlay" class="absolute inset-0 bg-black/50 backdrop-blur-sm z-40 flex items-center justify-center hidden">
+                        <span id="countdownText" class="text-8xl font-bold text-white animate-pulse">3</span>
+                    </div>
+
+                    <!-- 録画中インジケーター -->
+                    <div id="recordingIndicator" class="absolute top-4 right-4 z-40 flex items-center gap-2 bg-black/60 px-3 py-1 rounded-full hidden">
+                        <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
+                        <span id="recordTimer" class="text-white text-sm font-mono">00:00</span>
+                    </div>
+
+                    <!-- カメラ開始前のプレースホルダー -->
+                    <div id="cameraPlaceholder" class="absolute inset-0 flex flex-col items-center justify-center text-slate-400 bg-slate-100 z-30">
+                        <button onclick="startCamera()" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-full font-bold shadow-lg transition flex items-center gap-2">
+                            <i class="fas fa-camera"></i> カメラを起動
+                        </button>
+                        <p class="text-xs mt-3 text-slate-400">ブラウザのカメラ許可が必要です</p>
+                    </div>
+                </div>
+
+                <!-- 録画コントロール -->
+                <div class="flex justify-center gap-4 mt-1">
+                    <button id="recordBtn" onclick="startCountdown()" class="flex-1 bg-rose-500 hover:bg-rose-600 disabled:bg-slate-300 disabled:cursor-not-allowed text-white py-3 rounded-lg font-bold shadow transition flex items-center justify-center gap-2" disabled>
+                        <i class="fas fa-circle"></i> 録画開始
+                    </button>
+                    <button id="stopBtn" onclick="stopRecording()" class="flex-1 bg-slate-700 hover:bg-slate-800 text-white py-3 rounded-lg font-bold shadow transition flex items-center justify-center gap-2 hidden">
+                        <i class="fas fa-stop"></i> 録画終了
+                    </button>
+                    <button id="retakeBtn" onclick="retake()" class="flex-1 bg-slate-500 hover:bg-slate-600 text-white py-3 rounded-lg font-bold shadow transition flex items-center justify-center gap-2 hidden">
+                        <i class="fas fa-redo"></i> 撮り直す
+                    </button>
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <footer class="bg-slate-800 text-slate-400 py-6 mt-8">
+        <div class="max-w-7xl mx-auto px-4 text-center">
+            <p class="text-sm">
+                <i class="fas fa-shield-alt mr-1"></i> プライバシー保護: 撮影した動画はサーバーにアップロードされず、お使いの端末内でのみ処理されます。
+            </p>
+            <p class="text-xs mt-2 text-slate-500">&copy; 2024 FormMirror Movement Analysis App</p>
+        </div>
+    </footer>
+
+    <!-- 使い方のヘルプモーダル -->
+    <div id="helpModal" class="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm hidden flex items-center justify-center p-4 transition-opacity duration-300">
+        <div class="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto transform transition-all scale-100">
+            <!-- Header -->
+            <div class="bg-blue-600 text-white p-4 flex justify-between items-center sticky top-0 z-10">
+                <h3 class="text-lg font-bold flex items-center gap-2"><i class="fas fa-book-reader"></i> 使い方ガイド</h3>
+                <button onclick="toggleHelp()" class="hover:bg-blue-700 rounded-full w-8 h-8 flex items-center justify-center transition">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <!-- Content -->
+            <div class="p-6 space-y-8">
+                <!-- Step 1 -->
+                <div class="flex gap-4">
+                    <div class="flex-shrink-0 w-10 h-10 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center font-bold text-lg">1</div>
+                    <div>
+                        <h4 class="font-bold text-slate-800 mb-1 text-lg">準備・設定</h4>
+                        <p class="text-sm text-slate-600 leading-relaxed">
+                            右側の「<i class="fas fa-camera text-blue-500"></i> カメラを起動」ボタンを押してカメラを許可してください。<br>
+                            左側の「<i class="fas fa-upload text-blue-500"></i> 動画を選択」からお手本動画を読み込むこともできます。
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Step 2 -->
+                <div class="flex gap-4">
+                    <div class="flex-shrink-0 w-10 h-10 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center font-bold text-lg">2</div>
+                    <div>
+                        <h4 class="font-bold text-slate-800 mb-1 text-lg">録画する</h4>
+                        <p class="text-sm text-slate-600 leading-relaxed">
+                            「<span class="font-bold text-rose-500">録画開始</span>」ボタンを押すと3秒のカウントダウンが始まります。<br>
+                            全身が映る位置に移動して動作を行ってください。<br>
+                            終わったら「録画終了」を押します。
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Step 3 -->
+                <div class="flex gap-4">
+                    <div class="flex-shrink-0 w-10 h-10 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center font-bold text-lg">3</div>
+                    <div>
+                        <h4 class="font-bold text-slate-800 mb-1 text-lg">分析・チェック</h4>
+                        <p class="text-sm text-slate-600 leading-relaxed">
+                            録画が終わると自動的に再生画面になります。<br>
+                            「<span class="font-bold text-emerald-500">再生</span>」ボタンで左右の動画を同時に再生し、動きのズレを確認できます。<br>
+                            <span class="bg-slate-100 px-1 rounded text-xs">0.25</span> などのボタンでスロー再生も可能です。
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Step 4 -->
+                <div class="flex gap-4">
+                    <div class="flex-shrink-0 w-10 h-10 bg-purple-100 text-purple-600 rounded-full flex items-center justify-center font-bold text-lg">4</div>
+                    <div>
+                        <h4 class="font-bold text-slate-800 mb-1 text-lg">AI機能の活用</h4>
+                        <p class="text-sm text-slate-600 leading-relaxed">
+                            上部のチェックボックスで以下の機能をオンオフできます：
+                            <ul class="list-disc list-inside mt-1 ml-1 space-y-1 text-xs text-slate-500">
+                                <li><strong>骨格表示:</strong> 体の軸や関節の位置を確認</li>
+                                <li><strong>軌跡表示:</strong> 手足の動いたルートを可視化</li>
+                                <li><strong>表情ワイプ:</strong> 顔を自動拡大して表情をチェック</li>
+                            </ul>
+                        </p>
+                    </div>
+                </div>
+            </div>
+            <!-- Footer -->
+             <div class="p-4 border-t border-slate-100 text-center bg-slate-50 rounded-b-2xl">
+                <button onclick="toggleHelp()" class="bg-blue-600 text-white px-8 py-2.5 rounded-lg font-bold hover:bg-blue-700 shadow-lg transition active:scale-95">閉じる</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ロジック -->
+    <script>
+        // DOM要素
+        const modelInput = document.getElementById('modelInput');
+        const modelVideo = document.getElementById('modelVideo');
+        const modelPlaceholder = document.getElementById('modelPlaceholder');
+        const modelSeek = document.getElementById('modelSeek');
+        const modelTimeDisplay = document.getElementById('modelTimeDisplay');
+
+        const cameraVideo = document.getElementById('cameraVideo');
+        const recordedVideo = document.getElementById('recordedVideo');
+        const cameraPlaceholder = document.getElementById('cameraPlaceholder');
+        const countdownOverlay = document.getElementById('countdownOverlay');
+        const countdownText = document.getElementById('countdownText');
+        const recordingIndicator = document.getElementById('recordingIndicator');
+        const recordTimer = document.getElementById('recordTimer');
+        
+        const outputCanvas = document.getElementById('outputCanvas');
+        const canvasCtx = outputCanvas.getContext('2d');
+
+        const recordBtn = document.getElementById('recordBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const retakeBtn = document.getElementById('retakeBtn');
+
+        const syncPlayBtn = document.getElementById('syncPlayBtn');
+        const syncPauseBtn = document.getElementById('syncPauseBtn');
+        
+        const skeletonToggle = document.getElementById('skeletonToggle');
+        const trajectoryToggle = document.getElementById('trajectoryToggle');
+        const faceZoomToggle = document.getElementById('faceZoomToggle');
+        const aiStatusText = document.getElementById('aiStatusText');
+        const aiStatusDot = document.getElementById('aiStatusDot');
+
+        // レイアウト制御
+        const layoutBtn = document.getElementById('layoutBtn');
+        const videoGrid = document.getElementById('videoGrid');
+        const modelColumn = document.getElementById('modelColumn');
+        const cameraColumn = document.getElementById('cameraColumn');
+        
+        // ヘルプモーダル
+        const helpModal = document.getElementById('helpModal');
+
+        // 変数
+        let mediaRecorder;
+        let recordedChunks = [];
+        let stream = null;
+        let recordingStartTime;
+        let recordingInterval;
+        let playbackRate = 1.0;
+        let isMirror = true;
+        let isSingleView = false;
+        
+        // MediaPipe Pose関連変数
+        let pose;
+        let isPoseLoaded = false;
+        let trajectoryHistory = {
+            leftHand: [], // 左手首
+            rightHand: [], // 右手首
+            leftFoot: [], // 左足首
+            rightFoot: [], // 右足首
+            nose: [] // 頭（鼻）
+        };
+        const MAX_HISTORY = 40; // 軌跡の長さ
+        let animationFrameId;
+
+        // --- 初期化 & MediaPipe Setup ---
+        
+        function onPoseResults(results) {
+            if (!isPoseLoaded) {
+                isPoseLoaded = true;
+                aiStatusText.textContent = "AI稼働中";
+                aiStatusText.classList.add("text-emerald-500");
+                aiStatusDot.classList.remove("bg-slate-300");
+                aiStatusDot.classList.add("bg-emerald-500", "animate-pulse");
+            }
+
+            // キャンバスサイズをビデオに合わせる
+            outputCanvas.width = outputCanvas.clientWidth;
+            outputCanvas.height = outputCanvas.clientHeight;
+            
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
+
+            if (results.poseLandmarks) {
+                const landmarks = results.poseLandmarks;
+
+                // 軌跡の更新
+                if (trajectoryToggle.checked) {
+                    updateTrajectory(landmarks);
+                    drawTrajectory();
+                }
+
+                // 骨格の描画
+                if (skeletonToggle.checked) {
+                    drawConnectors(canvasCtx, landmarks, POSE_CONNECTIONS,
+                                 {color: '#00FF00', lineWidth: 4});
+                    drawLandmarks(canvasCtx, landmarks,
+                                {color: '#FF0000', lineWidth: 2, radius: 3});
+                }
+
+                // 表情ワイプ (Face Zoom)
+                if (faceZoomToggle.checked) {
+                    drawFaceZoom(results.image, landmarks);
+                }
+            }
+            canvasCtx.restore();
+        }
+
+        function drawFaceZoom(image, landmarks) {
+            // 顔のランドマークインデックス (0-10: 鼻, 目, 耳, 口)
+            const faceIndices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+            let minX = 1, minY = 1, maxX = 0, maxY = 0;
+            
+            let detected = false;
+            faceIndices.forEach(i => {
+                const lm = landmarks[i];
+                if (lm.visibility > 0.5) {
+                    detected = true;
+                    if (lm.x < minX) minX = lm.x;
+                    if (lm.x > maxX) maxX = lm.x;
+                    if (lm.y < minY) minY = lm.y;
+                    if (lm.y > maxY) maxY = lm.y;
+                }
+            });
+
+            if (detected && maxX > minX && maxY > minY) {
+                const srcW = image.videoWidth || image.width;
+                const srcH = image.videoHeight || image.height;
+                const canvasW = outputCanvas.width;
+                
+                if (!srcW || !srcH) return;
+
+                const faceCX = (minX + maxX) / 2 * srcW;
+                const faceCY = (minY + maxY) / 2 * srcH;
+                const faceW = (maxX - minX) * srcW;
+                const faceH = (maxY - minY) * srcH;
+                
+                const cropSize = Math.max(faceW, faceH) * 2.5; 
+                const displaySize = 180; 
+                const padding = 16;
+                
+                let destX;
+                if (isMirror) {
+                    destX = padding; 
+                } else {
+                    destX = canvasW - displaySize - padding;
+                }
+                const destY = padding;
+
+                canvasCtx.save();
+                
+                canvasCtx.beginPath();
+                canvasCtx.rect(destX, destY, displaySize, displaySize);
+                canvasCtx.lineWidth = 4;
+                canvasCtx.strokeStyle = '#f59e0b';
+                canvasCtx.stroke();
+                
+                canvasCtx.fillStyle = '#000';
+                canvasCtx.fill();
+                
+                canvasCtx.clip();
+                
+                try {
+                    canvasCtx.drawImage(
+                        image, 
+                        faceCX - cropSize/2, faceCY - cropSize/2, cropSize, cropSize, 
+                        destX, destY, displaySize, displaySize 
+                    );
+                } catch(e) {
+                }
+                
+                canvasCtx.resetTransform(); 
+                canvasCtx.restore(); 
+
+                canvasCtx.save();
+                canvasCtx.restore();
+            }
+        }
+
+        function updateTrajectory(landmarks) {
+            const points = {
+                leftHand: landmarks[19], 
+                rightHand: landmarks[20],
+                leftFoot: landmarks[27], 
+                rightFoot: landmarks[28],
+                nose: landmarks[0]
+            };
+
+            const minConfidence = 0.5;
+
+            for (const [key, point] of Object.entries(points)) {
+                if (point && point.visibility > minConfidence) {
+                    trajectoryHistory[key].push({
+                        x: point.x * outputCanvas.width,
+                        y: point.y * outputCanvas.height
+                    });
+                }
+
+                if (trajectoryHistory[key].length > MAX_HISTORY) {
+                    trajectoryHistory[key].shift();
+                }
+            }
+        }
+
+        function drawTrajectory() {
+            const colors = {
+                leftHand: 'rgba(59, 130, 246, 0.7)', 
+                rightHand: 'rgba(244, 63, 94, 0.7)', 
+                leftFoot: 'rgba(16, 185, 129, 0.7)', 
+                rightFoot: 'rgba(245, 158, 11, 0.7)', 
+                nose: 'rgba(255, 255, 255, 0.5)' 
+            };
+
+            canvasCtx.lineWidth = 6;
+            canvasCtx.lineCap = 'round';
+            canvasCtx.lineJoin = 'round';
+
+            for (const [key, history] of Object.entries(trajectoryHistory)) {
+                if (history.length < 2) continue;
+
+                canvasCtx.strokeStyle = colors[key];
+                canvasCtx.beginPath();
+                
+                canvasCtx.moveTo(history[0].x, history[0].y);
+                for (let i = 1; i < history.length; i++) {
+                    canvasCtx.lineTo(history[i].x, history[i].y);
+                }
+                canvasCtx.stroke();
+            }
+        }
+
+        function clearTrajectory() {
+            for (const key in trajectoryHistory) {
+                trajectoryHistory[key] = [];
+            }
+        }
+
+        // MediaPipe初期化
+        window.onload = () => {
+            pose = new Pose({locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+            }});
+            
+            pose.setOptions({
+                modelComplexity: 1,
+                smoothLandmarks: true,
+                enableSegmentation: false,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+            
+            pose.onResults(onPoseResults);
+            
+            // AI処理ループ開始
+            startProcessingLoop();
+        };
+
+        // ビデオ処理ループ（カメラまたは録画映像をAIに送る）
+        async function startProcessingLoop() {
+            // アクティブなビデオ要素を特定
+            let activeVideo = null;
+            if (!recordedVideo.classList.contains('hidden') && !recordedVideo.paused) {
+                activeVideo = recordedVideo;
+            } else if (!cameraVideo.classList.contains('hidden')) {
+                activeVideo = cameraVideo;
+            }
+
+            if (activeVideo && activeVideo.readyState >= 2) { // HAVE_CURRENT_DATA
+                await pose.send({image: activeVideo});
+            }
+
+            animationFrameId = requestAnimationFrame(startProcessingLoop);
+        }
+
+        // --- レイアウト機能 ---
+        function toggleLayout() {
+            isSingleView = !isSingleView;
+            if (isSingleView) {
+                modelColumn.classList.add('hidden');
+                videoGrid.classList.remove('md:grid-cols-2');
+                videoGrid.classList.add('grid-cols-1');
+                layoutBtn.innerHTML = '<i class="fas fa-columns"></i> <span>2画面モード</span>';
+            } else {
+                modelColumn.classList.remove('hidden');
+                videoGrid.classList.add('md:grid-cols-2');
+                videoGrid.classList.remove('grid-cols-1');
+                layoutBtn.innerHTML = '<i class="fas fa-square"></i> <span>シングルモード</span>';
+            }
+            setTimeout(() => {
+                outputCanvas.width = outputCanvas.clientWidth;
+                outputCanvas.height = outputCanvas.clientHeight;
+            }, 350);
+        }
+        
+        // --- ヘルプ機能 ---
+        function toggleHelp() {
+            helpModal.classList.toggle('hidden');
+        }
+        // 外側クリックで閉じる
+        helpModal.addEventListener('click', (e) => {
+            if (e.target === helpModal) toggleHelp();
+        });
+
+        // --- お手本動画機能 ---
+
+        modelInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                const url = URL.createObjectURL(file);
+                modelVideo.src = url;
+                modelVideo.load();
+                modelPlaceholder.classList.add('hidden');
+                
+                modelVideo.onloadedmetadata = () => {
+                    modelSeek.max = modelVideo.duration;
+                    updateTimeDisplay(modelVideo, modelTimeDisplay);
+                };
+            }
+        });
+
+        modelVideo.addEventListener('timeupdate', () => {
+            modelSeek.value = modelVideo.currentTime;
+            updateTimeDisplay(modelVideo, modelTimeDisplay);
+        });
+
+        modelSeek.addEventListener('input', () => {
+            modelVideo.currentTime = modelSeek.value;
+        });
+
+        function updateTimeDisplay(video, display) {
+            const current = formatTime(video.currentTime);
+            const total = formatTime(video.duration || 0);
+            display.textContent = `${current} / ${total}`;
+        }
+
+        function formatTime(seconds) {
+            const m = Math.floor(seconds / 60);
+            const s = Math.floor(seconds % 60);
+            return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+        }
+
+        // --- カメラ・録画機能 ---
+
+        async function startCamera() {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        width: { ideal: 1280 }, 
+                        height: { ideal: 720 },
+                        facingMode: "user" 
+                    }, 
+                    audio: true 
+                });
+                
+                cameraVideo.srcObject = stream;
+                cameraPlaceholder.classList.add('hidden');
+                recordBtn.disabled = false;
+                cameraVideo.muted = true;
+
+            } catch (err) {
+                console.error("Error accessing camera:", err);
+                alert("カメラの起動に失敗しました。");
+            }
+        }
+
+        function toggleMirror() {
+            isMirror = !isMirror;
+            if (isMirror) {
+                cameraVideo.classList.add('mirror-mode');
+                recordedVideo.style.transform = "scaleX(-1)";
+                outputCanvas.classList.add('canvas-mirror');
+            } else {
+                cameraVideo.classList.remove('mirror-mode');
+                recordedVideo.style.transform = "scaleX(1)";
+                outputCanvas.classList.remove('canvas-mirror');
+            }
+        }
+        // 初期状態
+        recordedVideo.style.transform = "scaleX(-1)";
+
+        function startCountdown() {
+            recordBtn.disabled = true;
+            countdownOverlay.classList.remove('hidden');
+            let count = 3;
+            countdownText.textContent = count;
+
+            const timer = setInterval(() => {
+                count--;
+                if (count > 0) {
+                    countdownText.textContent = count;
+                } else {
+                    clearInterval(timer);
+                    countdownOverlay.classList.add('hidden');
+                    startRecording();
+                }
+            }, 1000);
+        }
+
+        function startRecording() {
+            clearTrajectory(); // 録画開始時に軌跡クリア
+            recordedChunks = [];
+            let options = { mimeType: 'video/webm;codecs=vp9' };
+            if (!MediaRecorder.isTypeSupported(options.mimeType)) options = { mimeType: 'video/webm' };
+            if (!MediaRecorder.isTypeSupported(options.mimeType)) options = { mimeType: '' };
+
+            try {
+                mediaRecorder = new MediaRecorder(stream, options);
+            } catch (e) {
+                console.error('Exception while creating MediaRecorder:', e);
+                return;
+            }
+
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    recordedChunks.push(event.data);
+                }
+            };
+
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(recordedChunks, { type: 'video/webm' });
+                const url = URL.createObjectURL(blob);
+                recordedVideo.src = url;
+                
+                cameraVideo.classList.add('hidden');
+                recordedVideo.classList.remove('hidden');
+                stopBtn.classList.add('hidden');
+                retakeBtn.classList.remove('hidden');
+                
+                recordedVideo.muted = false;
+                recordedVideo.playbackRate = playbackRate;
+            };
+
+            mediaRecorder.start();
+            recordBtn.classList.add('hidden');
+            stopBtn.classList.remove('hidden');
+            recordingIndicator.classList.remove('hidden');
+            
+            recordingStartTime = Date.now();
+            recordTimer.textContent = "00:00";
+            recordingInterval = setInterval(() => {
+                const diff = Math.floor((Date.now() - recordingStartTime) / 1000);
+                recordTimer.textContent = formatTime(diff);
+            }, 1000);
+        }
+
+        function stopRecording() {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+            }
+            clearInterval(recordingInterval);
+            recordingIndicator.classList.add('hidden');
+        }
+
+        function retake() {
+            recordedVideo.pause();
+            recordedVideo.classList.add('hidden');
+            cameraVideo.classList.remove('hidden');
+            
+            retakeBtn.classList.add('hidden');
+            recordBtn.classList.remove('hidden');
+            recordBtn.disabled = false;
+            
+            URL.revokeObjectURL(recordedVideo.src);
+            recordedVideo.src = '';
+            
+            clearTrajectory(); // 撮り直し時に軌跡クリア
+            canvasCtx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
+        }
+
+        // --- 同期再生・コントロール機能 ---
+
+        function setSpeed(rate) {
+            playbackRate = rate;
+            modelVideo.playbackRate = rate;
+            if (recordedVideo.src) {
+                recordedVideo.playbackRate = rate;
+            }
+            
+            document.querySelectorAll('.speed-btn').forEach(btn => {
+                if(btn.textContent == rate || (btn.textContent == "1.0" && rate == 1)) {
+                    btn.classList.add('bg-blue-600', 'text-white', 'border-blue-600');
+                    btn.classList.remove('bg-white', 'text-slate-800', 'border-slate-300');
+                } else {
+                    btn.classList.remove('bg-blue-600', 'text-white', 'border-blue-600');
+                    btn.classList.add('bg-white', 'text-slate-800', 'border-slate-300');
+                }
+            });
+        }
+
+        syncPlayBtn.addEventListener('click', () => {
+            if (modelVideo.readyState >= 2) modelVideo.play();
+            if (recordedVideo.src && !recordedVideo.classList.contains('hidden')) {
+                recordedVideo.play();
+            }
+            togglePlayPauseUI(true);
+        });
+
+        syncPauseBtn.addEventListener('click', () => {
+            modelVideo.pause();
+            if (recordedVideo.src) recordedVideo.pause();
+            togglePlayPauseUI(false);
+        });
+
+        function resetVideos() {
+            modelVideo.pause();
+            modelVideo.currentTime = 0;
+            
+            if (recordedVideo.src) {
+                recordedVideo.pause();
+                recordedVideo.currentTime = 0;
+                clearTrajectory(); // リセット時に軌跡もクリア
+            }
+            togglePlayPauseUI(false);
+        }
+
+        function togglePlayPauseUI(isPlaying) {
+            if (isPlaying) {
+                syncPlayBtn.classList.add('hidden');
+                syncPauseBtn.classList.remove('hidden');
+            } else {
+                syncPlayBtn.classList.remove('hidden');
+                syncPauseBtn.classList.add('hidden');
+            }
+        }
+        
+        modelVideo.addEventListener('ended', () => {
+             togglePlayPauseUI(false);
+        });
+
+    </script>
+</body>
+</html>
